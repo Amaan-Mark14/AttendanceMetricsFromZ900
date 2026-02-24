@@ -122,6 +122,11 @@ class AttendanceWindow(QMainWindow):
         self.clear_button.clicked.connect(self.clear_database)
         buttons_layout.addWidget(self.clear_button)
 
+        self.debug_button = QPushButton("🐛 Load Debug Data")
+        self.debug_button.setStyleSheet("background-color: #eef; color: #006;")
+        self.debug_button.clicked.connect(self.load_debug_data)
+        buttons_layout.addWidget(self.debug_button)
+
         buttons_layout.addStretch()
 
         import_layout.addSpacing(10)
@@ -205,6 +210,43 @@ class AttendanceWindow(QMainWindow):
                 error_msg = f"Failed to clear database: {str(e)}"
                 self.log_text.append(f"✗ {error_msg}")
                 QMessageBox.critical(self, "Error", error_msg)
+
+    def load_debug_data(self):
+        try:
+            debug_file = Path("debug.txt")
+            if not debug_file.exists():
+                QMessageBox.warning(self, "File Not Found",
+                                   "debug.txt not found in the program folder.\n\n"
+                                   "Please create a debug.txt file with attendance data for testing.")
+                return
+
+            self.status_label.setText("Status: Loading debug data...")
+            self.log_text.append("🐛 Starting debug data import...")
+
+            from import_usb import USBImporter
+            importer = USBImporter("", "")  # USB name not needed for debug file
+
+            result = importer._parse_and_import_file(debug_file)
+
+            if result["success"]:
+                self.status_label.setText("Status: Debug data loaded successfully")
+                self.log_text.append(f"✓ Loaded {result['records_imported']} debug records")
+                self.log_text.append(f"✓ Skipped {result['duplicates_skipped']} duplicates")
+
+                self.dashboard.load_data()
+
+                QMessageBox.information(self, "Debug Data Loaded",
+                                       f"Successfully loaded {result['records_imported']} debug records.")
+            else:
+                self.status_label.setText("Status: Debug data import failed")
+                self.log_text.append(f"✗ Error: {result.get('error', 'Unknown error')}")
+                QMessageBox.critical(self, "Import Failed",
+                                    f"Failed to load debug data.\nError: {result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            error_msg = f"Failed to load debug data: {str(e)}"
+            self.log_text.append(f"✗ {error_msg}")
+            QMessageBox.critical(self, "Error", error_msg)
 
 def main():
     app = QApplication(sys.argv)
