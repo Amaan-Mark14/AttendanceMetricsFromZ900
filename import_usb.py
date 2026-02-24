@@ -139,9 +139,13 @@ class USBImporter:
                 if not header_line.strip():
                     continue
 
+                # Check if this is a header row or data row
                 headers = [h.strip() for h in header_line.split('\t')]
 
-                for line in lines[1:]:
+                # If first row contains "No" and "TMNo", it's a header - skip it
+                start_idx = 1 if 'No' in headers and 'TMNo' in headers else 0
+
+                for line in lines[start_idx if start_idx > 0 else 1:]:
                     if not line.strip():
                         continue
 
@@ -173,7 +177,7 @@ class USBImporter:
                             print(f"DEBUG - Parsed record: {record}")
 
                         cursor.execute('''
-                            SELECT id FROM raw_logs
+                            SELECT id, hidden FROM raw_logs
                             WHERE no = ? AND tm_no = ? AND en_no = ? AND datetime = ?
                         ''', (record['no'], record['tm_no'], record['en_no'], record['datetime']))
 

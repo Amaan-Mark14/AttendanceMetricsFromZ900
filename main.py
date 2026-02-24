@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from import_usb import USBImporter
 from dashboard import Dashboard
+from employees import EmployeeManager
 
 class USBImportThread(QThread):
     finished = Signal(dict)
@@ -62,10 +63,51 @@ class AttendanceWindow(QMainWindow):
                 antipass INTEGER,
                 proxy_work INTEGER,
                 datetime TEXT,
+                hidden INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (import_batch_id) REFERENCES import_batches(id)
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS shifts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                grace_period INTEGER DEFAULT 15,
+                minimum_hours REAL DEFAULT 4.0,
+                maximum_hours REAL DEFAULT 12.0,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                en_no TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                gm_no INTEGER,
+                shift_id INTEGER,
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (shift_id) REFERENCES shifts(id)
+            )
+        ''')
+
+        # Create default shift if none exists
+        cursor.execute('SELECT COUNT(*) FROM shifts')
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('''
+                INSERT INTO shifts (name, start_time, end_time, grace_period, minimum_hours, maximum_hours)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', ('Default Shift', '09:00', '18:00', 15, 4.0, 12.0))
+
+        # Add hidden column to raw_logs if it doesn't exist (for existing databases)
+        try:
+            cursor.execute("SELECT hidden FROM raw_logs LIMIT 1")
+        except:
+            cursor.execute('ALTER TABLE raw_logs ADD COLUMN hidden INTEGER DEFAULT 0')
 
         conn.commit()
         conn.close()
@@ -139,7 +181,10 @@ class AttendanceWindow(QMainWindow):
         self.tab_widget.addTab(import_widget, "USB Import")
 
         self.dashboard = Dashboard()
-        self.tab_widget.addTab(self.dashboard, "Dashboard")
+        self.tab_widget.addTab(self.dashboard, "Logs")
+
+        self.employee_manager = EmployeeManager()
+        self.tab_widget.addTab(self.employee_manager, "Employees")
 
     def read_from_usb(self):
         USB_NAME = "ATTENDANCE_USB"  # configurable
@@ -166,6 +211,7 @@ class AttendanceWindow(QMainWindow):
                                    f"Successfully imported {result['records_imported']} attendance records.")
 
             self.dashboard.load_data()
+            self.employee_manager.load_employees()
         else:
             self.status_label.setText("Status: Import failed")
             self.log_text.append(f"✗ Error: {result.get('error', 'Unknown error')}")
@@ -202,6 +248,7 @@ class AttendanceWindow(QMainWindow):
                 self.last_import_label.setText("Last import: Never")
 
                 self.dashboard.load_data()
+                self.employee_manager.load_employees()
 
                 QMessageBox.information(self, "Database Cleared",
                                        "All data has been successfully deleted from the database.")
