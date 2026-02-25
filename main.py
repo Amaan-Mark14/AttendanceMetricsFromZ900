@@ -8,7 +8,9 @@ import sqlite3
 from pathlib import Path
 from import_usb import USBImporter
 from dashboard import Dashboard
+from attendance_dashboard import AttendanceDashboard
 from employees import EmployeeManager
+from audit_tab import AuditTab
 
 class USBImportThread(QThread):
     finished = Signal(dict)
@@ -30,7 +32,6 @@ class AttendanceWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Attendance Management System")
-        self.setGeometry(100, 100, 600, 400)
 
         self.init_database()
         self.setup_ui()
@@ -109,6 +110,43 @@ class AttendanceWindow(QMainWindow):
         except:
             cursor.execute('ALTER TABLE raw_logs ADD COLUMN hidden INTEGER DEFAULT 0')
 
+        # Add work_schedule column to employees if it doesn't exist
+        try:
+            cursor.execute("SELECT work_schedule FROM employees LIMIT 1")
+        except:
+            cursor.execute('ALTER TABLE employees ADD COLUMN work_schedule TEXT DEFAULT "1111110"')
+
+        # Add is_locked column to employees if it doesn't exist
+        try:
+            cursor.execute("SELECT is_locked FROM employees LIMIT 1")
+        except:
+            cursor.execute('ALTER TABLE employees ADD COLUMN is_locked INTEGER DEFAULT 0')
+
+        # Create month_locks table for month locking feature
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS month_locks (
+                year INTEGER,
+                month INTEGER,
+                locked_at TEXT,
+                PRIMARY KEY (year, month)
+            )
+        ''')
+
+        # Create edit_history table for audit trail
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS edit_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT,
+                record_id INTEGER,
+                action TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                reason TEXT,
+                edited_by TEXT,
+                edited_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -150,12 +188,6 @@ class AttendanceWindow(QMainWindow):
 
         import_layout.addSpacing(10)
 
-        self.last_import_label = QLabel("Last import: Never")
-        self.last_import_label.setAlignment(Qt.AlignCenter)
-        import_layout.addWidget(self.last_import_label)
-
-        import_layout.addSpacing(20)
-
         buttons_layout = QHBoxLayout()
         import_layout.addLayout(buttons_layout)
 
@@ -180,11 +212,17 @@ class AttendanceWindow(QMainWindow):
 
         self.tab_widget.addTab(import_widget, "USB Import")
 
-        self.dashboard = Dashboard()
-        self.tab_widget.addTab(self.dashboard, "Logs")
-
         self.employee_manager = EmployeeManager()
         self.tab_widget.addTab(self.employee_manager, "Employees")
+
+        self.attendance_dashboard = AttendanceDashboard(employee_manager=self.employee_manager)
+        self.tab_widget.addTab(self.attendance_dashboard, "Attendance")
+
+        self.dashboard = Dashboard()
+        self.tab_widget.addTab(self.dashboard, "Raw Logs")
+
+        self.audit_tab = AuditTab()
+        self.tab_widget.addTab(self.audit_tab, "Audit")
 
     def read_from_usb(self):
         USB_NAME = "ATTENDANCE_USB"  # configurable
@@ -205,12 +243,12 @@ class AttendanceWindow(QMainWindow):
             self.status_label.setText(f"Status: Import completed successfully!")
             self.log_text.append(f"✓ Imported {result['records_imported']} records")
             self.log_text.append(f"✓ Skipped {result['duplicates_skipped']} duplicates")
-            self.last_import_label.setText(f"Last import: {result['import_time']}")
 
             QMessageBox.information(self, "Import Complete",
                                    f"Successfully imported {result['records_imported']} attendance records.")
 
             self.dashboard.load_data()
+            self.attendance_dashboard.load_data()
             self.employee_manager.load_employees()
         else:
             self.status_label.setText("Status: Import failed")
@@ -226,8 +264,12 @@ class AttendanceWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "Clear Database",
             "Are you sure you want to clear all data?\n\nThis will delete:\n"
-            "• All imported attendance records\n"
-            "• All import history\n\nThis action cannot be undone!",
+            "• All imported attendance records (except locked months)\n"
+            "• All import history\n"
+            "• All employees (except locked employees)\n"
+            "• All shifts (except default)\n\n"
+            "Locked months and locked employees will be preserved.\n\n"
+            "This action cannot be undone!",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -237,21 +279,78 @@ class AttendanceWindow(QMainWindow):
                 conn = sqlite3.connect('attendance.db')
                 cursor = conn.cursor()
 
-                cursor.execute("DELETE FROM raw_logs")
+                # Check for locked months
+                cursor.execute('SELECT year, month FROM month_locks')
+                locked_months = cursor.fetchall()
+
+                if locked_months:
+                    # Build list of protected year-month periods
+                    protected_periods = [f"{year}-{month:02d}" for year, month in locked_months]
+                    locked_list = "\n".join([f"{m[1]}/{m[0]}" for m in locked_months])
+
+                    QMessageBox.warning(
+                        self, "Locked Months Detected",
+                        f"The following months are LOCKED and will be preserved:\n{locked_list}\n\n"
+                        "Only unlocked data will be cleared."
+                    )
+
+                    # Delete logs NOT in protected periods
+                    # Build the NOT IN clause dynamically
+                    placeholders = ','.join(['?' for _ in protected_periods])
+                    cursor.execute(f'''
+                        DELETE FROM raw_logs
+                        WHERE strftime('%Y-%m', datetime) NOT IN ({placeholders})
+                    ''', protected_periods)
+                else:
+                    # No locks, delete all logs
+                    cursor.execute("DELETE FROM raw_logs")
+
+                # Check for locked employees
+                cursor.execute('SELECT en_no, name, shift_id FROM employees WHERE is_locked = 1')
+                locked_employees = cursor.fetchall()
+
+                if locked_employees:
+                    locked_list = "\n".join([f"{e[0]} - {e[1]}" for e in locked_employees])
+                    QMessageBox.warning(
+                        self, "Locked Employees Detected",
+                        f"The following employees are LOCKED and will be preserved:\n{locked_list}\n\n"
+                        "Only unlocked employees will be deleted."
+                    )
+
+                    # Delete only unlocked employees
+                    cursor.execute("DELETE FROM employees WHERE is_locked = 0")
+
+                    # Get shift IDs used by locked employees
+                    locked_shift_ids = [e[2] for e in locked_employees if e[2]]
+                else:
+                    # No locked employees, delete all
+                    cursor.execute("DELETE FROM employees")
+                    locked_shift_ids = []
+
+                # Delete shifts NOT used by locked employees and not the default shift
+                if locked_shift_ids:
+                    placeholders = ','.join(['?' for _ in locked_shift_ids])
+                    cursor.execute(f"DELETE FROM shifts WHERE name != 'Default Shift' AND id NOT IN ({placeholders})", locked_shift_ids)
+                else:
+                    cursor.execute("DELETE FROM shifts WHERE name != 'Default Shift'")
+
+                # Always delete import batches (they don't affect locked data)
                 cursor.execute("DELETE FROM import_batches")
 
                 conn.commit()
                 conn.close()
 
-                self.log_text.append("🗑️ Database cleared successfully")
+                self.log_text.append("🗑️ Database cleared successfully (locked months & employees preserved)")
                 self.status_label.setText("Status: Database cleared")
-                self.last_import_label.setText("Last import: Never")
 
-                self.dashboard.load_data()
+                # Refresh employees first (they may need to be auto-imported)
                 self.employee_manager.load_employees()
+                # Then refresh dashboard (which will also check if employees need importing)
+                self.dashboard.load_data()
+                self.attendance_dashboard.load_data()
 
                 QMessageBox.information(self, "Database Cleared",
-                                       "All data has been successfully deleted from the database.")
+                                       "Data has been cleared.\n\nLocked months and locked employees were preserved.")
 
             except Exception as e:
                 error_msg = f"Failed to clear database: {str(e)}"
@@ -281,6 +380,7 @@ class AttendanceWindow(QMainWindow):
                 self.log_text.append(f"✓ Skipped {result['duplicates_skipped']} duplicates")
 
                 self.dashboard.load_data()
+                self.attendance_dashboard.load_data()
 
                 QMessageBox.information(self, "Debug Data Loaded",
                                        f"Successfully loaded {result['records_imported']} debug records.")
@@ -298,7 +398,7 @@ class AttendanceWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = AttendanceWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
