@@ -1,12 +1,14 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
                                QTableWidgetItem, QHeaderView, QLabel, QComboBox,
                                QPushButton, QLineEdit, QMessageBox, QDateEdit,
-                               QTableWidgetSelectionRange)
+                               QTableWidgetSelectionRange, QFileDialog)
 from PySide6.QtCore import Qt, QDate, QRect
 from PySide6.QtGui import QFont, QColor, QPainter, QBrush, QPen
 from datetime import datetime
 from attendance_processor import AttendanceCalculator
 import sqlite3
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 class AttendanceDashboard(QWidget):
     def __init__(self, employee_manager=None):
@@ -93,6 +95,10 @@ class AttendanceDashboard(QWidget):
         controls_layout.addWidget(self.year_selector)
 
         controls_layout.addStretch()
+
+        self.export_button = QPushButton("📊 Export to Excel")
+        self.export_button.clicked.connect(self.export_to_excel)
+        controls_layout.addWidget(self.export_button)
 
         self.lock_button = QPushButton("🔒 Lock Month")
         self.lock_button.clicked.connect(self.toggle_month_lock)
@@ -748,6 +754,254 @@ class AttendanceDashboard(QWidget):
         item = QTableWidgetItem(str(text))
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         return item
+
+    def export_to_excel(self):
+        """Export current month data to Excel with multiple sheets"""
+        try:
+            # Get current month/year for filename
+            month_name = self.month_selector.currentText()
+            year = self.current_year
+            month = self.current_month
+
+            # File dialog for saving
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                f"Export {month_name} {year} Attendance",
+                f"Attendance_{month_name}_{year}.xlsx",
+                "Excel Files (*.xlsx)"
+            )
+
+            if not filename:
+                return
+
+            # Create workbook
+            wb = openpyxl.Workbook()
+
+            # Sheet 1: Monthly Summary
+            self._export_monthly_summary_sheet(wb, year, month, month_name)
+
+            # Sheet 2: Raw Logs for the month
+            self._export_raw_logs_sheet(wb, year, month, month_name)
+
+            # Sheet 3: Daily Details
+            self._export_daily_details_sheet(wb, year, month, month_name)
+
+            # Save workbook
+            wb.save(filename)
+
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Attendance data exported successfully to:\n{filename}\n\n"
+                f"Sheets created:\n"
+                f"• Monthly Summary\n"
+                f"• Raw Logs\n"
+                f"• Daily Details"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Failed",
+                f"Failed to export data:\n{str(e)}"
+            )
+
+    def _export_monthly_summary_sheet(self, wb, year, month, month_name):
+        """Create monthly summary sheet"""
+        ws = wb.active
+        ws.title = "Monthly Summary"
+
+        # Get data
+        summaries = self.calculator.get_all_employees_summary(year, month)
+
+        # Header styling
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_alignment = Alignment(horizontal="center", vertical="center")
+
+        # Title
+        ws.merge_cells('A1:K1')
+        title_cell = ws['A1']
+        title_cell.value = f"Attendance Summary - {month_name} {year}"
+        title_cell.font = Font(bold=True, size=16)
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Headers
+        headers = ["En No", "Name", "Present", "Absent", "Holidays",
+                  "Half-Day", "Late", "Missing Checkout", "Total Hours", "Working Days"]
+
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(row=2, column=col)
+            cell.value = header
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+
+        # Data rows
+        for idx, summary in enumerate(summaries, start=3):
+            ws.cell(row=idx, column=1, value=summary['en_no'])
+            ws.cell(row=idx, column=2, value=summary['name'])
+            ws.cell(row=idx, column=3, value=summary['days_present'])
+            ws.cell(row=idx, column=4, value=summary['days_absent'])
+            ws.cell(row=idx, column=5, value=summary.get('days_holiday', 0))
+            ws.cell(row=idx, column=6, value=summary['days_half_day'])
+            ws.cell(row=idx, column=7, value=summary['days_late'])
+            ws.cell(row=idx, column=8, value=summary['days_missing_checkout'])
+            ws.cell(row=idx, column=9, value=f"{summary['total_hours']:.1f}")
+            ws.cell(row=idx, column=10, value=summary['total_days'])
+
+        # Column widths
+        column_widths = [15, 25, 10, 10, 10, 10, 10, 12, 12, 12, 2]
+        for col, width in enumerate(column_widths, start=1):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+
+        # Freeze header row
+        ws.freeze_panes = 'A3'
+
+    def _export_raw_logs_sheet(self, wb, year, month, month_name):
+        """Create raw logs sheet for the month"""
+        ws = wb.create_sheet(title="Raw Logs")
+
+        # Header styling
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_alignment = Alignment(horizontal="center", vertical="center")
+
+        # Title
+        ws.merge_cells('A1:D1')
+        title_cell = ws['A1']
+        title_cell.value = f"Raw Scan Logs - {month_name} {year}"
+        title_cell.font = Font(bold=True, size=16)
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Headers
+        headers = ["Date/Time", "En No", "Name", "Mode"]
+
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(row=2, column=col)
+            cell.value = header
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+
+        # Get raw logs for the month
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+
+        month_pattern = f"{year}-{month:02d}"
+        cursor.execute('''
+            SELECT datetime, en_no, name, mode
+            FROM raw_logs
+            WHERE hidden = 0 AND strftime('%Y-%m', datetime) = ?
+            ORDER BY datetime ASC
+        ''', (month_pattern,))
+
+        logs = cursor.fetchall()
+        conn.close()
+
+        # Data rows
+        for idx, log in enumerate(logs, start=3):
+            ws.cell(row=idx, column=1, value=log[0])  # datetime
+            ws.cell(row=idx, column=2, value=log[1])  # en_no
+            ws.cell(row=idx, column=3, value=log[2])  # name
+            ws.cell(row=idx, column=4, value=log[3])  # mode
+
+        # Column widths
+        column_widths = [20, 12, 20, 10, 2]
+        for col, width in enumerate(column_widths, start=1):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+
+        # Freeze header row
+        ws.freeze_panes = 'A3'
+
+    def _export_daily_details_sheet(self, wb, year, month, month_name):
+        """Create daily details sheet with day-by-day breakdown"""
+        ws = wb.create_sheet(title="Daily Details")
+
+        # Header styling
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_alignment = Alignment(horizontal="center", vertical="center")
+
+        # Conditional formatting fills
+        present_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Light green
+        absent_fill = PatternFill(start_color="FFB6C1", end_color="FFB6C1", fill_type="solid")   # Light red
+        flag_fill = PatternFill(start_color="FFCCCB", end_color="FFCCCB", fill_type="solid")    # Light red for flags
+
+        # Title
+        ws.merge_cells('A1:J1')
+        title_cell = ws['A1']
+        title_cell.value = f"Daily Details - {month_name} {year}"
+        title_cell.font = Font(bold=True, size=16)
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Headers
+        headers = ["Date", "En No", "Name", "Status", "First Scan", "Last Scan",
+                  "Hours", "Late?", "Missing Checkout?", "Scan Count"]
+
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(row=2, column=col)
+            cell.value = header
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+
+        # Get all employees
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT en_no, name FROM employees WHERE is_active = 1 ORDER BY en_no')
+        employees = cursor.fetchall()
+        conn.close()
+
+        # Get all days in the month
+        import calendar
+        days_in_month = calendar.monthrange(year, month)[1]
+
+        row_idx = 3
+        for day in range(1, days_in_month + 1):
+            date_str = f"{year}-{month:02d}-{day:02d}"
+
+            for en_no, name in employees:
+                record = self.calculator.calculate_day(en_no, date_str)
+
+                if record:
+                    # Basic data
+                    ws.cell(row=row_idx, column=1, value=date_str)
+                    ws.cell(row=row_idx, column=2, value=en_no)
+                    ws.cell(row=row_idx, column=3, value=name)
+
+                    # Status with conditional formatting
+                    status_cell = ws.cell(row=row_idx, column=4, value=record['status'])
+                    if record['status'] == 'Present':
+                        status_cell.fill = present_fill
+                    elif record['status'] == 'Absent':
+                        status_cell.fill = absent_fill
+
+                    # Scan data
+                    ws.cell(row=row_idx, column=5, value=record.get('first_scan', '-'))
+                    ws.cell(row=row_idx, column=6, value=record.get('last_scan', '-'))
+                    ws.cell(row=row_idx, column=7, value=f"{record['total_hours']:.1f}")
+
+                    # Late flag with conditional formatting
+                    late_cell = ws.cell(row=row_idx, column=8, value="Yes" if record['is_late'] else "No")
+                    if record['is_late']:
+                        late_cell.fill = flag_fill
+
+                    # Missing checkout flag with conditional formatting
+                    mc_cell = ws.cell(row=row_idx, column=9, value="Yes" if record['missing_checkout'] else "No")
+                    if record['missing_checkout']:
+                        mc_cell.fill = flag_fill
+
+                    # Scan count
+                    ws.cell(row=row_idx, column=10, value=record['scan_count'])
+
+                    row_idx += 1
+
+        # Column widths
+        column_widths = [12, 12, 20, 12, 20, 20, 8, 8, 12, 10, 2]
+        for col, width in enumerate(column_widths, start=1):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+
+        # Freeze header row
+        ws.freeze_panes = 'A3'
 
 
 class TimelineWidget(QWidget):
